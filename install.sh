@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Sjtech Panel - Debian Installation Script
+# Sjtech Panel - Debian Installation Script with Enhanced Login-Only Authentication
 # This script installs and configures the Sjtech Panel with Nginx, SSL, and Bind9 integration
+# Features: Login-only access, enhanced security, and improved user experience
 
 set -e  # Exit on error
 set -u  # Exit on undefined variable
@@ -48,6 +49,8 @@ command_exists() {
 
 # Function to get system information
 get_system_info() {
+    print_info "Gathering system information..."
+    
     # Get hostname
     HOSTNAME=$(hostname)
     
@@ -61,10 +64,10 @@ get_system_info() {
     PUBLIC_IP=$(curl -s ifconfig.me || curl -s icanhazip.com || echo "unknown")
     
     print_info "System Information:"
-    print_info "Hostname: $HOSTNAME"
-    print_info "IP Address: $IP_ADDRESS"
-    print_info "Public IP: $PUBLIC_IP"
-    print_info "Current Domain: $CURRENT_DOMAIN"
+    print_info "  Hostname: $HOSTNAME"
+    print_info "  IP Address: $IP_ADDRESS"
+    print_info "  Public IP: $PUBLIC_IP"
+    print_info "  Current Domain: $CURRENT_DOMAIN"
 }
 
 # Function to configure hostname
@@ -72,21 +75,29 @@ configure_hostname() {
     print_info "Configuring hostname..."
     
     # Backup current hostname
-    cp /etc/hostname /etc/hostname.bak
+    if [ -f /etc/hostname ]; then
+        cp /etc/hostname /etc/hostname.bak
+        print_info "  Backup created: /etc/hostname.bak"
+    fi
     
     # Set new hostname (can be customized)
     read -p "Enter new hostname (default: sjtech-panel): " NEW_HOSTNAME
     NEW_HOSTNAME=${NEW_HOSTNAME:-sjtech-panel}
     
     echo "$NEW_HOSTNAME" > /etc/hostname
+    print_info "  New hostname set: $NEW_HOSTNAME"
     
     # Update hosts file
-    cp /etc/hosts /etc/hosts.bak
+    if [ -f /etc/hosts ]; then
+        cp /etc/hosts /etc/hosts.bak
+        print_info "  Backup created: /etc/hosts.bak"
+    fi
+    
     sed -i "s/127.0.1.1.*/127.0.1.1 $NEW_HOSTNAME $NEW_HOSTNAME.local/" /etc/hosts
+    print_info "  Hosts file updated"
     
     # Apply hostname changes
     hostnamectl set-hostname "$NEW_HOSTNAME"
-    
     print_success "Hostname configured to: $NEW_HOSTNAME"
 }
 
@@ -98,11 +109,13 @@ configure_domain() {
     read -p "Enter domain name (default: panel.yourdomain.com): " DOMAIN
     DOMAIN=${DOMAIN:-panel.yourdomain.com}
     
+    print_info "  Domain set to: $DOMAIN"
+    
     # Check if domain resolves to this server
     DOMAIN_IP=$(dig +short $DOMAIN)
     if [ "$DOMAIN_IP" != "$IP_ADDRESS" ] && [ "$DOMAIN_IP" != "$PUBLIC_IP" ]; then
-        print_warning "Warning: Domain $DOMAIN doesn't resolve to this server's IP ($IP_ADDRESS/$PUBLIC_IP)"
-        read -p "Continue anyway? (y/n): " CONTINUE
+        print_warning "  Warning: Domain $DOMAIN doesn't resolve to this server's IP ($IP_ADDRESS/$PUBLIC_IP)"
+        read -p "  Continue anyway? (y/n): " CONTINUE
         if [ "$CONTINUE" != "y" ]; then
             print_error "Installation aborted by user"
             exit 1
@@ -116,11 +129,18 @@ configure_domain() {
 install_dependencies() {
     print_info "Installing system dependencies..."
     
+    # Check if package manager is available
+    if ! command_exists apt; then
+        print_error "Package manager 'apt' not found. This script is for Debian/Ubuntu systems."
+        exit 1
+    fi
+    
     # Update package lists
     apt update
     
     # Install required packages
-    apt install -y nginx certbot python3-certbot-nginx bind9 nodejs npm git curl ufw
+    local packages="nginx certbot python3-certbot-nginx bind9 nodejs npm git curl ufw mariadb-server"
+    apt install -y $packages
     
     # Install Node.js if not available
     if ! command_exists node; then
@@ -153,11 +173,11 @@ create_directories() {
     print_success "Directory structure created"
 }
 
-# Function to setup frontend
+# Function to setup frontend with login-only authentication
 setup_frontend() {
-    print_info "Setting up frontend..."
+    print_info "Setting up frontend with login-only authentication..."
     
-    # Create frontend index.html
+    # Create frontend files
     cat > "$FRONTEND_DIR/index.html" << 'EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -187,71 +207,142 @@ setup_frontend() {
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // Sidebar Component
-        const Sidebar = ({ activeItem, setActiveItem }) => {
-            const menuItems = [
-                { icon: 'fas fa-chart-line', label: 'Dashboard', key: 'dashboard' },
-                { icon: 'fas fa-globe', label: 'Websites', key: 'websites' },
-                { icon: 'fas fa-network-wired', label: 'Domains', key: 'domains' },
-                { icon: 'fas fa-dharmachakra', label: 'DNS Manager', key: 'dns' },
-                { icon: 'fas fa-server', label: 'FTP Accounts', key: 'ftp' },
-                { icon: 'fas fa-database', label: 'Databases', key: 'databases' },
-                { icon: 'fas fa-shield-alt', label: 'Security Center', key: 'security' }
-            ];
+        // Auth Context
+        const AuthContext = React.createContext();
+
+        // Auth Provider Component
+        const AuthProvider = ({ children }) => {
+            const [user, setUser] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [authError, setAuthError] = useState('');
+
+            useEffect(() => {
+                // Check if user is logged in
+                fetch('/api/auth/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        setUser(data.user);
+                        setLoading(false);
+                    })
+                    .catch(error => {
+                        console.error('Auth check failed:', error);
+                        setUser(null);
+                        setLoading(false);
+                    });
+            }, []);
+
+            const login = async (email, password) => {
+                setAuthError('');
+                try {
+                    const response = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, password })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        setUser(data.user);
+                        return { success: true };
+                    } else {
+                        setAuthError(data.message || 'Login failed');
+                        return { success: false, message: data.message };
+                    }
+                } catch (error) {
+                    setAuthError('Network error. Please try again.');
+                    return { success: false, message: 'Network error' };
+                }
+            };
+
+            const logout = async () => {
+                try {
+                    await fetch('/api/auth/logout', { method: 'POST' });
+                    setUser(null);
+                } catch (error) {
+                    console.error('Logout failed:', error);
+                }
+            };
 
             return (
-                <div className="w-64 bg-slate-900 p-4 h-full">
-                    <div className="flex items-center mb-8">
-                        <i className="fas fa-th-large text-xl mr-3"></i>
-                        <span className="text-xl font-semibold">Dashboard</span>
-                    </div>
-                    <nav>
-                        {menuItems.map((item) => (
-                            <div
-                                key={item.key}
-                                className={`sidebar-item p-3 mb-2 rounded-lg flex items-center cursor-pointer ${
-                                    activeItem === item.key ? 'bg-slate-700' : 'hover:bg-slate-800'
-                                }`}
-                                onClick={() => setActiveItem(item.key)}
-                            >
-                                <i className={`${item.icon} mr-3`}></i>
-                                <span>{item.label}</span>
+                <AuthContext.Provider value={{ user, loading, authError, login, logout }}>
+                    {children}
+                </AuthContext.Provider>
+            );
+        };
+
+        // Protected Route Component
+        const ProtectedRoute = ({ children }) => {
+            const { user, loading, authError } = React.useContext(AuthContext);
+            
+            if (loading) return <div className="flex items-center justify-center h-screen">Loading...</div>;
+            if (!user) return <LoginPage />;
+            
+            return children;
+        };
+
+        // Login Page Component
+        const LoginPage = () => {
+            const [email, setEmail] = useState('');
+            const [password, setPassword] = useState('');
+            const { login } = React.useContext(AuthContext);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                const result = await login(email, password);
+                if (result.success) {
+                    window.location.href = '/dashboard';
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center bg-slate-900">
+                    <div className="max-w-md w-full p-8 bg-slate-800 rounded-lg shadow-xl">
+                        <div className="text-center mb-8">
+                            <h2 className="text-3xl font-bold text-white">Sjtech Panel</h2>
+                            <p className="text-gray-400 mt-2">Sign in to your account</p>
+                        </div>
+                        <form onSubmit={handleSubmit} className="space-y-6">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-2">Email</label>
+                                <input
+                                    type="email"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    placeholder="Enter your email"
+                                    required
+                                />
                             </div>
-                        ))}
-                    </nav>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-300 mb-2">Password</label>
+                                <input
+                                    type="password"
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                    placeholder="Enter your password"
+                                    required
+                                />
+                            </div>
+                            {authError && <div className="text-red-400 text-sm text-center">{authError}</div>}
+                            <button
+                                type="submit"
+                                className="w-full py-3 px-4 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 font-medium transition duration-200"
+                            >
+                                Sign In
+                            </button>
+                        </form>
+                        <div className="mt-6 text-center text-gray-400 text-sm">
+                            Don't have an account? Contact your administrator.
+                        </div>
+                    </div>
                 </div>
             );
         };
 
-        // Stats Card Component
-        const StatsCard = ({ title, children, className = "" }) => (
-            <div className={`card rounded-xl p-6 ${className}`}>
-                <h3 className="text-lg font-medium mb-4">{title}</h3>
-                {children}
-            </div>
-        );
-
-        // Chart Component
-        const Chart = ({ type, data, options, height = "120px" }) => {
-            const canvasRef = useRef(null);
-
-            useEffect(() => {
-                const canvas = canvasRef.current;
-                const ctx = canvas.getContext('2d');
-                new Chart(ctx, {
-                    type,
-                    data,
-                    options
-                });
-            }, [type, data, options]);
-
-            return <canvas ref={canvasRef} height={height}></canvas>;
-        };
-
-        // Main App Component
-        const App = () => {
-            const [activeItem, setActiveItem] = useState('dashboard');
+        // Dashboard Component
+        const Dashboard = () => {
             const [systemStats, setSystemStats] = useState(null);
+            const { user, logout } = React.useContext(AuthContext);
 
             useEffect(() => {
                 // Fetch system stats from API
@@ -262,13 +353,20 @@ setup_frontend() {
 
             return (
                 <div className="flex h-screen">
-                    <Sidebar activeItem={activeItem} setActiveItem={setActiveItem} />
+                    <Sidebar />
                     
                     <div className="flex-1 p-8">
                         <div className="flex justify-between items-center mb-8">
                             <h1 className="text-3xl font-bold">Sjtech Panel</h1>
-                            <div className="flex items-center">
+                            <div className="flex items-center space-x-4">
+                                <span className="text-sm">{user?.email}</span>
                                 <img src="https://placehold.co/40x40/6366f1/ffffff?text=U" alt="User avatar" className="w-10 h-10 rounded-full" />
+                                <button 
+                                    onClick={logout}
+                                    className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 transition duration-200"
+                                >
+                                    Logout
+                                </button>
                             </div>
                         </div>
 
@@ -370,6 +468,79 @@ setup_frontend() {
             );
         };
 
+        // Sidebar Component
+        const Sidebar = () => {
+            const [activeItem, setActiveItem] = useState('dashboard');
+            const menuItems = [
+                { icon: 'fas fa-chart-line', label: 'Dashboard', key: 'dashboard' },
+                { icon: 'fas fa-globe', label: 'Websites', key: 'websites' },
+                { icon: 'fas fa-network-wired', label: 'Domains', key: 'domains' },
+                { icon: 'fas fa-dharmachakra', label: 'DNS Manager', key: 'dns' },
+                { icon: 'fas fa-server', label: 'FTP Accounts', key: 'ftp' },
+                { icon: 'fas fa-database', label: 'Databases', key: 'databases' },
+                { icon: 'fas fa-shield-alt', label: 'Security Center', key: 'security' }
+            ];
+
+            return (
+                <div className="w-64 bg-slate-900 p-4 h-full">
+                    <div className="flex items-center mb-8">
+                        <i className="fas fa-th-large text-xl mr-3"></i>
+                        <span className="text-xl font-semibold">Dashboard</span>
+                    </div>
+                    <nav>
+                        {menuItems.map((item) => (
+                            <div
+                                key={item.key}
+                                className={`sidebar-item p-3 mb-2 rounded-lg flex items-center cursor-pointer ${
+                                    activeItem === item.key ? 'bg-slate-700' : 'hover:bg-slate-800'
+                                }`}
+                                onClick={() => setActiveItem(item.key)}
+                            >
+                                <i className={`${item.icon} mr-3`}></i>
+                                <span>{item.label}</span>
+                            </div>
+                        ))}
+                    </nav>
+                </div>
+            );
+        };
+
+        // Stats Card Component
+        const StatsCard = ({ title, children, className = "" }) => (
+            <div className={`card rounded-xl p-6 ${className}`}>
+                <h3 className="text-lg font-medium mb-4">{title}</h3>
+                {children}
+            </div>
+        );
+
+        // Chart Component
+        const Chart = ({ type, data, options, height = "120px" }) => {
+            const canvasRef = useRef(null);
+
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                new Chart(ctx, {
+                    type,
+                    data,
+                    options
+                });
+            }, [type, data, options]);
+
+            return <canvas ref={canvasRef} height={height}></canvas>;
+        };
+
+        // Main App Component
+        const App = () => {
+            return (
+                <AuthProvider>
+                    <ProtectedRoute>
+                        <Dashboard />
+                    </ProtectedRoute>
+                </AuthProvider>
+            );
+        };
+
         ReactDOM.render(<App />, document.getElementById('root'));
     </script>
 </body>
@@ -379,21 +550,161 @@ EOF
     print_success "Frontend setup completed"
 }
 
-# Function to setup backend
+# Function to setup backend with login-only authentication
 setup_backend() {
-    print_info "Setting up backend..."
+    print_info "Setting up backend with login-only authentication..."
     
-    # Create backend server.js
+    # Check if MySQL service is running
+    if ! systemctl is-active --quiet mysql; then
+        print_warning "MySQL service is not running. Attempting to start..."
+        systemctl start mysql
+        if ! systemctl is-active --quiet mysql; then
+            print_error "Failed to start MySQL service. Please check your MySQL installation."
+            exit 1
+        fi
+        print_success "MySQL service started"
+    fi
+
+    # Create database and tables
+    print_info "Setting up MySQL database..."
+    mysql -u root -e "
+        CREATE DATABASE IF NOT EXISTS sjtech_panel;
+        USE sjtech_panel;
+        CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            email VARCHAR(100) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_login TIMESTAMP NULL,
+            is_active BOOLEAN DEFAULT TRUE,
+            failed_attempts INT DEFAULT 0,
+            lock_until TIMESTAMP NULL
+        );
+    "
+    print_success "Database and tables created"
+
+    # Create backend server.js with login-only authentication
     cat > "$BACKEND_DIR/server.js" << 'EOF'
 const express = require('express');
 const os = require('os');
 const { exec } = require('child_process');
+const bcrypt = require('bcrypt');
+const session = require('express-session');
+const MySQLStore = require('express-mysql-session')(session);
+const mysql = require('mysql2/promise');
+const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
+const xss = require('xss-clean');
+const cors = require('cors');
+
 const app = express();
 const port = 3001;
 
+// Database connection
+const dbConfig = {
+    host: 'localhost',
+    user: 'root',
+    password: '',
+    database: 'sjtech_panel'
+};
+
+// Security middleware
+app.use(helmet());
+app.use(xss());
+app.use(cors({
+    origin: true,
+    credentials: true
+}));
+
+// Rate limiting
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // Limit each IP to 5 login requests per windowMs
+    message: {
+        success: false,
+        message: 'Too many login attempts. Please try again later.'
+    },
+    handler: (req, res) => {
+        res.status(429).json({
+            success: false,
+            message: 'Too many login attempts. Please try again after 15 minutes.'
+        });
+    }
+});
+
+// Session configuration with enhanced security
+const sessionStore = new MySQLStore({}, dbConfig);
+app.use(session({
+    key: 'session_cookie_name',
+    secret: crypto.randomBytes(64).toString('hex'),
+    store: sessionStore,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        maxAge: 1000 * 60 * 60 * 24, // 1 day
+        secure: false,
+        httpOnly: true,
+        sameSite: 'lax'
+    }
+}));
+
 // Middleware
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static('frontend'));
+
+// Database connection pool
+const pool = mysql.createPool(dbConfig);
+
+// Authentication middleware
+const authenticateToken = async (req, res, next) => {
+    if (req.session.userId) {
+        try {
+            const [rows] = await pool.execute('SELECT id, name, email, is_active FROM users WHERE id = ? AND is_active = TRUE', [req.session.userId]);
+            if (rows.length > 0) {
+                req.user = rows[0];
+                // Update last login
+                await pool.execute('UPDATE users SET last_login = NOW() WHERE id = ?', [req.session.userId]);
+                next();
+            } else {
+                req.session.destroy();
+                res.status(401).json({ error: 'Unauthorized' });
+            }
+        } catch (error) {
+            res.status(500).json({ error: 'Authentication error' });
+        }
+    } else {
+        res.status(401).json({ error: 'Unauthorized' });
+    }
+};
+
+// Password validation
+const validatePassword = (password) => {
+    const minLength = 8;
+    const hasUpperCase = /[A-Z]/.test(password);
+    const hasLowerCase = /[a-z]/.test(password);
+    const hasNumbers = /\d/.test(password);
+    const hasSpecialChars = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+    
+    if (password.length < minLength) {
+        return 'Password must be at least 8 characters long';
+    }
+    if (!hasUpperCase) {
+        return 'Password must contain at least one uppercase letter';
+    }
+    if (!hasLowerCase) {
+        return 'Password must contain at least one lowercase letter';
+    }
+    if (!hasNumbers) {
+        return 'Password must contain at least one number';
+    }
+    if (!hasSpecialChars) {
+        return 'Password must contain at least one special character';
+    }
+    return null;
+};
 
 // System stats endpoint
 app.get('/api/system-stats', (req, res) => {
@@ -442,8 +753,101 @@ app.get('/api/system-stats', (req, res) => {
     });
 });
 
+// Authentication endpoints
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        
+        if (!email || !password) {
+            return res.status(400).json({ success: false, message: 'Email and password are required' });
+        }
+
+        // Find user
+        const [users] = await pool.execute('SELECT * FROM users WHERE email = ?', [email]);
+        const user = users[0];
+
+        if (!user) {
+            return res.status(400).json({ success: false, message: 'Invalid credentials' });
+        }
+
+        // Check if account is locked
+        if (!user.is_active) {
+            return res.status(403).json({ success: false, message: 'Account is locked. Please contact support.' });
+        }
+
+        // Check password
+        const passwordMatch = await bcrypt.compare(password, user.password);
+        if (!passwordMatch) {
+            // Increment failed attempts
+            await pool.execute(
+                'UPDATE users SET failed_attempts = failed_attempts + 1 WHERE id = ?',
+                [user.id]
+            );
+            
+            const [updatedUser] = await pool.execute('SELECT failed_attempts FROM users WHERE id = ?', [user.id]);
+            const failedAttempts = updatedUser[0].failed_attempts;
+            
+            if (failedAttempts >= 5) {
+                // Lock account for 15 minutes
+                const lockUntil = new Date(Date.now() + 15 * 60 * 1000);
+                await pool.execute(
+                    'UPDATE users SET is_active = FALSE, lock_until = ? WHERE id = ?',
+                    [lockUntil, user.id]
+                );
+                return res.status(403).json({ success: false, message: 'Account locked due to too many failed attempts. Please try again in 15 minutes.' });
+            }
+            
+            return res.status(400).json({ success: false, message: 'Invalid credentials' });
+        }
+
+        // Reset failed attempts and set account active
+        await pool.execute(
+            'UPDATE users SET failed_attempts = 0, is_active = TRUE WHERE id = ?',
+            [user.id]
+        );
+
+        // Set session
+        req.session.userId = user.id;
+
+        res.json({ 
+            success: true, 
+            message: 'Login successful',
+            user: { id: user.id, name: user.name, email: user.email }
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ success: false, message: 'Login failed' });
+    }
+});
+
+app.get('/api/auth/status', async (req, res) => {
+    if (req.session.userId) {
+        try {
+            const [users] = await pool.execute('SELECT id, name, email FROM users WHERE id = ?', [req.session.userId]);
+            const user = users[0];
+            res.json({ 
+                loggedin: true, 
+                user: user || null 
+            });
+        } catch (error) {
+            res.json({ loggedin: false, user: null });
+        }
+    } else {
+        res.json({ loggedin: false, user: null });
+    }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+    req.session.destroy(err => {
+        if (err) {
+            return res.status(500).json({ success: false, message: 'Logout failed' });
+        }
+        res.json({ success: true, message: 'Logout successful' });
+    });
+});
+
 // Websites endpoint
-app.get('/api/websites', (req, res) => {
+app.get('/api/websites', authenticateToken, (req, res) => {
     exec('ls /var/www/', (error, stdout, stderr) => {
         if (error) {
             return res.status(500).json({ error: 'Failed to get websites' });
@@ -452,6 +856,74 @@ app.get('/api/websites', (req, res) => {
         const websites = stdout.split('\n').filter(site => site.trim() !== '');
         res.json(websites);
     });
+});
+
+// User profile endpoint
+app.get('/api/user/profile', authenticateToken, async (req, res) => {
+    try {
+        const [users] = await pool.execute('SELECT id, name, email, created_at, last_login FROM users WHERE id = ?', [req.user.id]);
+        res.json({ success: true, user: users[0] });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to fetch user profile' });
+    }
+});
+
+// Update user profile endpoint
+app.put('/api/user/profile', authenticateToken, async (req, res) => {
+    try {
+        const { name } = req.body;
+        if (!name) {
+            return res.status(400).json({ success: false, message: 'Name is required' });
+        }
+
+        await pool.execute(
+            'UPDATE users SET name = ? WHERE id = ?',
+            [name, req.user.id]
+        );
+
+        res.json({ success: true, message: 'Profile updated successfully' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to update profile' });
+    }
+});
+
+// Change password endpoint
+app.put('/api/user/password', authenticateToken, async (req, res) => {
+    try {
+        const { currentPassword, newPassword } = req.body;
+        if (!currentPassword || !newPassword) {
+            return res.status(400).json({ success: false, message: 'Current and new password are required' });
+        }
+
+        // Validate new password
+        const passwordError = validatePassword(newPassword);
+        if (passwordError) {
+            return res.status(400).json({ success: false, message: passwordError });
+        }
+
+        // Get current user
+        const [users] = await pool.execute('SELECT password FROM users WHERE id = ?', [req.user.id]);
+        const user = users[0];
+
+        // Verify current password
+        const passwordMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!passwordMatch) {
+            return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+        }
+
+        // Hash new password
+        const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+        // Update password
+        await pool.execute(
+            'UPDATE users SET password = ? WHERE id = ?',
+            [hashedPassword, req.user.id]
+        );
+
+        res.json({ success: true, message: 'Password changed successfully' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: 'Failed to change password' });
+    }
 });
 
 // Start server
@@ -475,6 +947,12 @@ server {
     root $FRONTEND_DIR;
     index index.html;
     
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    
     location / {
         try_files \$uri \$uri/ /index.html;
     }
@@ -485,7 +963,18 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_cache_bypass \$http_upgrade;
+    }
+    
+    # Rate limiting
+    limit_req_zone \$binary_remote_addr zone=auth:10m rate=10r/s;
+    
+    # Block common attack patterns
+    location ~* \.(git|env|ini|log|sh|sql|bak|backup|old|tmp)$ {
+        deny all;
     }
 }
 EOF
@@ -528,6 +1017,22 @@ server {
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers off;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:MozSSL:10m;
+    ssl_session_tickets off;
+    
+    # OCSP stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    resolver 8.8.8.8 8.8.4.4 valid=300s;
+    resolver_timeout 5s;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:; object-src 'none';" always;
     
     root $FRONTEND_DIR;
     index index.html;
@@ -542,7 +1047,18 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_cache_bypass \$http_upgrade;
+    }
+    
+    # Rate limiting
+    limit_req_zone \$binary_remote_addr zone=auth:10m rate=10r/s;
+    
+    # Block common attack patterns
+    location ~* \.(git|env|ini|log|sh|sql|bak|backup|old|tmp)$ {
+        deny all;
     }
 }
 EOF
@@ -634,7 +1150,11 @@ module.exports = {
     error_file: '/var/log/pm2/error.log',
     out_file: '/var/log/pm2/out.log',
     log_file: '/var/log/pm2/combined.log',
-    time: true
+    time: true,
+    // Auto-restart on failure
+    autorestart: true,
+    // Restart delay
+    restart_delay: 5000
   }]
 };
 EOF
@@ -676,6 +1196,9 @@ setup_firewall() {
     # Allow PM2 port
     ufw allow 3001/tcp
     
+    # Allow MySQL (for backend)
+    ufw allow 3306/tcp
+    
     # Enable firewall
     ufw --force enable
     
@@ -697,6 +1220,7 @@ WorkingDirectory=$PANEL_DIR
 ExecStart=/usr/bin/npm start
 Restart=always
 RestartSec=10
+Environment=NODE_ENV=production
 
 [Install]
 WantedBy=multi-user.target
@@ -718,14 +1242,27 @@ display_summary() {
     print_info "Domain: $DOMAIN"
     print_info "Panel URL: https://$DOMAIN"
     print_info "Backend Port: 3001"
+    print_info "Database: MySQL (sjtech_panel)"
     print_info "===================="
     print_info "Installation completed successfully!"
     print_info "Please reboot the system for all changes to take effect."
+    print_info "Security features enabled:"
+    print_info "  - Login-only access (registration disabled)"
+    print_info "  - Password complexity requirements"
+    print_info "  - Account lockout after 5 failed attempts"
+    print_info "  - Rate limiting for authentication"
+    print_info "  - HTTPS with Let's Encrypt"
+    print_info "  - Security headers"
+    print_info "  - Input validation and sanitization"
+    print_info "===================="
+    print_info "Note: Users must be created manually in the database."
+    print_info "Contact your administrator for account access."
 }
 
 # Main installation function
 main() {
-    print_info "Starting Sjtech Panel installation..."
+    print_info "Starting Sjtech Panel installation with login-only authentication..."
+    print_info "This script will install all necessary components."
     
     # Get system information
     get_system_info

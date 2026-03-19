@@ -39,7 +39,7 @@ Memory: Minimal 2GB RAM
 Storage: Minimal 20GB disk space
 🚀 Instalasi
 Langkah 1: Clone Repository
-git clone https://github.com/jayaputra212/sjtech-panel/blob/main/install.sh sjtech-panel
+git clone https://github.com/jayaputra212/sjtech-panel/blob/main/install.sh sjtech-panel.sh
 Langkah 2: Jalankan Skrip Instalasi
 bash
 
@@ -61,7 +61,3 @@ Login
 Buka browser dan akses domain Anda
 Masukkan email dan password
 Akses dashboard setelah login berhasil
-Registrasi
-Klik "Register" di halaman login
-Isi form registrasi
-Konfirmasi email (jika diimplementasikan)
